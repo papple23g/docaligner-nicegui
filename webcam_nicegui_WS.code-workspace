@@ -1,0 +1,40 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		/* [替換文字]
+		專案名稱: webcam_nicegui
+		Python 版本: 3.13
+		
+		# 建立虛擬環境
+		uv venv "C:\\Users\\$Env:UserName\\venvs\\webcam_nicegui_venv" -p 3.13
+		
+		# 取消註解 `python.defaultInterpreterPath` 後重新啟動 */
+		"python.defaultInterpreterPath": "~\\venvs\\webcam_nicegui_venv\\Scripts\\python.exe",
+		/*
+		
+		# 初始化 uv 專案
+		uv init -p 3.13 --name webcam_nicegui
+		
+		# 開發: 追加模組 (範例)
+		uv add loguru nicegui
+		uv add pytest --dev
+		
+		# 安裝: 同步模組
+		uv sync
+		
+		# ~選擇性啟動虛擬環境
+		."C:\\Users\\$Env:UserName\\venvs\\webcam_nicegui_venv\\Scripts\\activate.ps1"
+		# ~選擇性確定 python 路徑 (會顯示虛擬環境路徑)
+		uv pip install pip
+		# ~選擇性確定環境變數正確
+		echo $Env:UV_PROJECT_ENVIRONMENT
+		*/
+		"terminal.integrated.env.windows": {
+			"UV_PROJECT_ENVIRONMENT": "C:\\Users\\${env:USERNAME}\\venvs\\webcam_nicegui_venv"
+		}
+	}
+}
