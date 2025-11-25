@@ -25,6 +25,9 @@
 		
 		# 安裝: 同步模組
 		uv sync
+
+		# 開啟防火牆
+		New-NetFirewallRule -DisplayName "NiceGUI Webcam" -Direction Inbound -Protocol TCP -LocalPort 25330 -Action Allow
 		
 		# ~選擇性啟動虛擬環境
 		."C:\\Users\\$Env:UserName\\venvs\\webcam_nicegui_venv\\Scripts\\activate.ps1"
