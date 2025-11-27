@@ -9,6 +9,20 @@ from nicegui import app, ui
 IMAGES_DIR = Path(__file__).parent / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
 
+# 最多保留的圖片數量
+MAX_IMAGES_COUNT = 30
+
+
+def cleanup_old_images() -> None:
+    image_path_list = sorted(
+        IMAGES_DIR.glob("*.jpg"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    while len(image_path_list) > MAX_IMAGES_COUNT:
+        oldest_path = image_path_list.pop(0)
+        oldest_path.unlink()
+        logger.info(f"已刪除舊圖片: {oldest_path.name}")
+
 
 def save_image(base64_data: str) -> bool:
     try:
@@ -24,6 +38,7 @@ def save_image(base64_data: str) -> bool:
 
         filepath.write_bytes(image_bytes)
         logger.info(f"已儲存圖片: {filename}")
+        cleanup_old_images()
         return True
     except Exception as e:
         logger.error(f"儲存圖片失敗: {e}")
@@ -37,7 +52,6 @@ app.add_static_files("/static", Path(__file__).parent / "static")
 @ui.page("/")
 def index_page():
     # 頁面狀態（每個 client 獨立）
-    is_capturing = False
     capture_count = 0
 
     ui.add_head_html('<script src="/static/webcam.js"></script>')
@@ -57,12 +71,6 @@ def index_page():
         status_label = ui.label("狀態：等待啟動攝像頭...").classes("mt-4 text-gray-600")
         count_label = ui.label("已儲存圖片：0 張").classes("text-gray-600")
 
-        # 控制按鈕
-        with ui.row().classes("mt-4 gap-4"):
-            start_btn = ui.button("🎬 開始錄製", color="green")
-            stop_btn = ui.button("⏹️ 停止錄製", color="red")
-            stop_btn.disable()
-
         # 定義接收圖片的處理函數
         def on_frame_received(base64_data: str):
             nonlocal capture_count
@@ -74,20 +82,25 @@ def index_page():
         # 使用全域事件監聽
         ui.on("webcam_frame", lambda e: on_frame_received(e.args))
 
-        # 初始化攝像頭
+        # 初始化攝像頭並自動開始擷取
         async def init_camera():
             try:
                 result = await ui.run_javascript(
                     """
                     (async () => {
                         const success = await WebcamCapture.init('webcam-video');
+                        if (success) {
+                            WebcamCapture.startCapture((frameData) => {
+                                emitEvent('webcam_frame', frameData);
+                            });
+                        }
                         return success;
                     })()
                     """,
                     timeout=10.0,
                 )
                 if result:
-                    status_label.set_text("狀態：攝像頭已就緒，點擊「開始錄製」")
+                    status_label.set_text("狀態：錄製中...")
                 else:
                     status_label.set_text("狀態：無法存取攝像頭，請確認權限設定")
                 return result
@@ -95,42 +108,6 @@ def index_page():
                 status_label.set_text("狀態：等待連線中...")
                 logger.warning("JavaScript 初始化超時，等待客戶端連接")
                 return False
-
-        # 開始錄製
-        async def start_capture():
-            nonlocal is_capturing
-            if is_capturing:
-                return
-
-            is_capturing = True
-            start_btn.disable()
-            stop_btn.enable()
-            status_label.set_text("狀態：錄製中...")
-
-            # 啟動 JS 端的擷取，使用 emitEvent 發送數據到後端
-            await ui.run_javascript(
-                """
-                WebcamCapture.startCapture((frameData) => {
-                    emitEvent('webcam_frame', frameData);
-                });
-                """,
-            )
-
-        # 停止錄製
-        async def stop_capture():
-            nonlocal is_capturing
-            if not is_capturing:
-                return
-
-            is_capturing = False
-            start_btn.enable()
-            stop_btn.disable()
-            status_label.set_text("狀態：已停止錄製")
-
-            await ui.run_javascript("WebcamCapture.stopCapture();")
-
-        start_btn.on_click(start_capture)
-        stop_btn.on_click(stop_capture)
 
         # 頁面載入後自動初始化攝像頭
         ui.timer(0.5, init_camera, once=True)

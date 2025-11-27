@@ -18,17 +18,16 @@
 		
 		# 初始化 uv 專案
 		uv init -p 3.13 --name webcam_nicegui
-		
-		# 開發: 追加模組 (範例)
-		uv add loguru nicegui
-		uv add pytest --dev
-		
+
 		# 安裝: 同步模組
 		uv sync
 
 		# 開啟防火牆
 		New-NetFirewallRule -DisplayName "NiceGUI Webcam" -Direction Inbound -Protocol TCP -LocalPort 25330 -Action Allow
 		
+        # 執行後端
+		uv run main.py
+
 		# 啟動 ngrok
 		 ."C:\Users\pappl\AppData\Local\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe"  http 25331
 		ngrok http 25331
