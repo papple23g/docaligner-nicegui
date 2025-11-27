@@ -9,9 +9,6 @@ from nicegui import app, ui
 IMAGES_DIR = Path(__file__).parent / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
 
-# 統計資料
-capture_stats = {"count": 0}
-
 
 def save_image(base64_data: str) -> bool:
     try:
@@ -26,8 +23,7 @@ def save_image(base64_data: str) -> bool:
         filepath = IMAGES_DIR / filename
 
         filepath.write_bytes(image_bytes)
-        capture_stats["count"] += 1
-        logger.info(f"已儲存圖片: {filename} (總計: {capture_stats['count']})")
+        logger.info(f"已儲存圖片: {filename}")
         return True
     except Exception as e:
         logger.error(f"儲存圖片失敗: {e}")
@@ -40,8 +36,9 @@ app.add_static_files("/static", Path(__file__).parent / "static")
 
 @ui.page("/")
 def index_page():
-    # 頁面狀態
-    is_capturing = {"value": False}
+    # 頁面狀態（每個 client 獨立）
+    is_capturing = False
+    capture_count = 0
 
     ui.add_head_html('<script src="/static/webcam.js"></script>')
 
@@ -68,9 +65,11 @@ def index_page():
 
         # 定義接收圖片的處理函數
         def on_frame_received(base64_data: str):
+            nonlocal capture_count
             if base64_data and isinstance(base64_data, str):
-                save_image(base64_data)
-                count_label.set_text(f"已儲存圖片：{capture_stats['count']} 張")
+                if save_image(base64_data):
+                    capture_count += 1
+                    count_label.set_text(f"已儲存圖片：{capture_count} 張")
 
         # 使用全域事件監聽
         ui.on("webcam_frame", lambda e: on_frame_received(e.args))
@@ -99,10 +98,11 @@ def index_page():
 
         # 開始錄製
         async def start_capture():
-            if is_capturing["value"]:
+            nonlocal is_capturing
+            if is_capturing:
                 return
 
-            is_capturing["value"] = True
+            is_capturing = True
             start_btn.disable()
             stop_btn.enable()
             status_label.set_text("狀態：錄製中...")
@@ -118,10 +118,11 @@ def index_page():
 
         # 停止錄製
         async def stop_capture():
-            if not is_capturing["value"]:
+            nonlocal is_capturing
+            if not is_capturing:
                 return
 
-            is_capturing["value"] = False
+            is_capturing = False
             start_btn.enable()
             stop_btn.disable()
             status_label.set_text("狀態：已停止錄製")
@@ -135,18 +136,8 @@ def index_page():
         ui.timer(0.5, init_camera, once=True)
 
 
-def get_local_ip() -> str:
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-
-
 def main():
-    port_int = 8080
+    port_int = 25331
     logger.info(f"啟動 Webcam Capture，端口: {port_int}")
 
     ui.run(

@@ -29,6 +29,10 @@
 		# 開啟防火牆
 		New-NetFirewallRule -DisplayName "NiceGUI Webcam" -Direction Inbound -Protocol TCP -LocalPort 25330 -Action Allow
 		
+		# 啟動 ngrok
+		 ."C:\Users\pappl\AppData\Local\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe"  http 25331
+		ngrok http 25331
+
 		# ~選擇性啟動虛擬環境
 		."C:\\Users\\$Env:UserName\\venvs\\webcam_nicegui_venv\\Scripts\\activate.ps1"
 		# ~選擇性確定 python 路徑 (會顯示虛擬環境路徑)
