@@ -10,6 +10,7 @@ from docaligner import DocAligner
 from loguru import logger
 
 sys.path.append(str(Path(__file__).parent.parent))  # noqa
+from libs.errors import CardDetectionError
 from libs.utils import IMAGES_DIR
 
 MAX_IMAGES_COUNT = 30
@@ -25,10 +26,16 @@ logger.info("DocAligner 模型載入完成！")
 def get_flat_rgb_img(
     bgr_img: np.ndarray,
 ) -> np.ndarray:
+    """ 偵測卡片並進行透視校正
+    Raises:
+        CardDetectionError: 未偵測到卡片
+    """
     poly_arr = DOC_ALIGNER(img=bgr_img, do_center_crop=True)
     poly_len_int = len(poly_arr)
     if poly_len_int != 4:
-        raise ValueError(f"未偵測到卡片: 偵測到 {poly_len_int} 個角點")
+        raise CardDetectionError(
+            message=f"未偵測到卡片: 偵測到 {poly_len_int} 個角點",
+        )
 
     logger.success("偵測到卡片！正在進行透視校正...")
     rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)

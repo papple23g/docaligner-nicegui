@@ -8,6 +8,7 @@ from nicegui import app, ui
 from pydantic import BaseModel
 
 sys.path.append(str(Path(__file__).parent.parent))  # noqa
+from libs.errors import CardDetectionError
 from libs.img_processer import (
     get_flat_rgb_img,
     save_corrected_image,
@@ -26,25 +27,7 @@ class UploadPhotoPost(BaseModel):
 
 
 class UploadPhotoOut(BaseModel):
-    success: bool
-    result_image_url: str | None = None
-    input_size: str | None = None
-    output_size: str | None = None
-    error: str | None = None
-    poly_count: int | None = None
-
-
-class CardDetectionError(Exception):
-    def __init__(
-        self,
-        message: str,
-        input_size: str,
-        poly_count: int,
-    ):
-        self.message = message
-        self.input_size = input_size
-        self.poly_count = poly_count
-        super().__init__(message)
+    img_url: str
 
 
 @app.exception_handler(CardDetectionError)
@@ -54,13 +37,8 @@ async def card_detection_error_handler(
 ) -> JSONResponse:
     logger.warning(f"卡片偵測失敗: {exc.message}")
     return JSONResponse(
-        status_code=200,  # 業務邏輯錯誤，非 HTTP 錯誤
-        content=UploadPhotoOut(
-            success=False,
-            error=exc.message,
-            input_size=exc.input_size,
-            poly_count=exc.poly_count,
-        ).model_dump(),
+        status_code=422,
+        content={"detail": exc.message},
     )
 
 
@@ -69,43 +47,19 @@ async def upload_photo_api(post: UploadPhotoPost) -> UploadPhotoOut:
     logger.info("收到 HTTP 上傳的圖片")
     bgr_img = to_bgr_img(img_b64_str=post.image)
     img_height_int, img_width_int = bgr_img.shape[:2]
-    input_size_str = f"{img_width_int}x{img_height_int}"
-    logger.info(f"收到高解析度圖片: {input_size_str}")
+    logger.info(f"收到高解析度圖片: {img_width_int}x{img_height_int}")
 
-    try:
-        flat_rgb_img = get_flat_rgb_img(bgr_img=bgr_img)
-    except ValueError as e:
-        # 從錯誤訊息中提取角點數量
-        error_msg = str(e)
-        poly_count_int = 0
-        if "偵測到" in error_msg:
-            # 例如: "未偵測到卡片: 偵測到 3 個角點"
-            import re
-            match = re.search(r"偵測到 (\d+) 個角點", error_msg)
-            if match:
-                poly_count_int = int(match.group(1))
-        raise CardDetectionError(
-            message=error_msg,
-            input_size=input_size_str,
-            poly_count=poly_count_int,
-        )
-
+    flat_rgb_img = get_flat_rgb_img(bgr_img=bgr_img)
     logger.info("卡片擷取成功！")
     saved_path = save_corrected_image(flat_rgb_img)
-    out_height_int, out_width_int = flat_rgb_img.shape[:2]
     if saved_path and saved_path.exists():
-        image_url = f"/images/{saved_path.name}"
-        logger.info(f"圖片 URL: {image_url}, 檔案存在: {saved_path.exists()}")
+        img_url = f"/images/{saved_path.name}"
+        logger.info(f"圖片 URL: {img_url}")
     else:
         logger.error(f"儲存的圖片不存在: {saved_path}")
-        image_url = ""
+        img_url = ""
 
-    return UploadPhotoOut(
-        success=True,
-        result_image_url=image_url,
-        input_size=input_size_str,
-        output_size=f"{out_width_int}x{out_height_int}",
-    )
+    return UploadPhotoOut(img_url=img_url)
 
 
 @ui.page("/")
@@ -115,7 +69,7 @@ def index_page():
     is_camera_ready = False
 
     # 加上版本號避免瀏覽器快取舊版 JavaScript
-    ui.add_head_html('<script src="/static/webcam.js?v=4"></script>')
+    ui.add_head_html('<script src="/static/webcam.js?v=5"></script>')
 
     with ui.column().classes("w-full items-center p-4"):
         ui.label("📷 卡片擷取與校正").classes("text-2xl font-bold mb-4")
@@ -256,14 +210,9 @@ def index_page():
                 logger.debug(f"HTTP 上傳結果: {result_dict}")
 
                 if result_dict.get("success"):
-                    result_url: str = result_dict.get("result_image_url", "")
-                    input_size: str = result_dict.get("input_size", "?")
-                    output_size: str = result_dict.get("output_size", "?")
-
+                    img_url: str = result_dict.get("img_url", "")
                     status_label.set_text("狀態：卡片擷取成功！")
-                    debug_label.set_text(
-                        f"原始: {input_size} → 輸出: {output_size}"
-                    )
+                    debug_label.set_text("")
 
                     # 停止攝像頭
                     ui.run_javascript("WebcamCapture.stop();")
@@ -271,7 +220,7 @@ def index_page():
                     # 隱藏 video，顯示結果
                     video_card.classes(add="hidden")
                     result_card.classes(remove="hidden")
-                    result_image.set_source(result_url)
+                    result_image.set_source(img_url)
 
                     # 隱藏拍照按鈕，顯示重新拍攝按鈕
                     capture_button.classes(add="hidden")
@@ -280,12 +229,8 @@ def index_page():
                 else:
                     # 失敗：顯示錯誤訊息
                     error_msg = result_dict.get("error", "未知錯誤")
-                    input_size = result_dict.get("input_size", "?")
-                    poly_count = result_dict.get("poly_count", 0)
-
                     status_label.set_text(f"狀態：{error_msg}，請重試")
-                    debug_label.set_text(
-                        f"尺寸: {input_size}, 角點數: {poly_count}")
+                    debug_label.set_text("")
                     capture_button.enable()
 
             except TimeoutError:

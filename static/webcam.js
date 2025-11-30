@@ -295,13 +295,16 @@ const WebcamCapture = {
                 body: JSON.stringify({ image: base64Data })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP 錯誤: ${response.status}`);
-            }
-
             const result = await response.json();
             console.log('HTTP 上傳結果:', result);
-            return result;
+
+            if (!response.ok) {
+                // 422 或其他錯誤狀態碼
+                return { success: false, error: result.detail || '未知錯誤' };
+            }
+
+            // 成功：添加 success 標記
+            return { success: true, img_url: result.img_url };
         } catch (error) {
             console.error('HTTP 上傳失敗:', error);
             return { success: false, error: error.message };
