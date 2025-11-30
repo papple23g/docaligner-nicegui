@@ -69,56 +69,138 @@ def index_page():
     is_camera_ready = False
 
     # 加上版本號避免瀏覽器快取舊版 JavaScript
-    ui.add_head_html('<script src="/static/webcam.js?v=5"></script>')
+    ui.add_head_html('<script src="/static/webcam.js?v=6"></script>')
 
-    with ui.column().classes("w-full items-center p-4"):
-        ui.label("📷 卡片擷取與校正").classes("text-2xl font-bold mb-4")
+    # 全屏樣式
+    ui.add_head_html("""
+    <style>
+        body { margin: 0; overflow: hidden; }
+        .fullscreen-container {
+            position: fixed;
+            inset: 0;
+            background: #000;
+        }
+        #webcam-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .card-guide {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 85%;
+            max-width: 400px;
+            aspect-ratio: 1.586 / 1;
+            border: 4px dashed #FFD700;
+            border-radius: 12px;
+            pointer-events: none;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.3);
+        }
+        .overlay-ui {
+            position: fixed;
+            left: 0;
+            right: 0;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            pointer-events: none;
+        }
+        .overlay-ui > * { pointer-events: auto; }
+        .top-ui { top: 20px; }
+        .bottom-ui { bottom: 30px; }
+        .status-text {
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .capture-btn {
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            background: white;
+            border: 4px solid #FFD700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: transform 0.1s;
+        }
+        .capture-btn:hover { transform: scale(1.05); }
+        .capture-btn:active { transform: scale(0.95); }
+        .capture-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .result-container {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            display: flex;
+            flex-direction: column;
+        }
+        .result-image {
+            flex: 1;
+            object-fit: contain;
+            width: 100%;
+        }
+        .retry-btn {
+            background: #FFD700;
+            color: #000;
+            border: none;
+            padding: 12px 32px;
+            border-radius: 25px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            margin: 20px;
+        }
+    </style>
+    """)
 
-        # 影像預覽區域
-        video_card = ui.card().classes("w-full max-w-lg")
-        with video_card:
-            ui.html(
-                '<video id="webcam-video" autoplay playsinline muted '
-                'style="width: 100%; border-radius: 8px; background: #000;"></video>',
-                sanitize=False,
-            )
+    # 攝像頭全屏容器
+    video_container = ui.html(
+        """
+        <div class="fullscreen-container" id="video-container">
+            <video id="webcam-video" autoplay playsinline muted></video>
+            <div class="card-guide"></div>
+        </div>
+        """,
+        sanitize=False,
+    )
 
-        # 結果圖片區域（拍照成功後顯示）
-        result_card = ui.card().classes("w-full max-w-lg hidden")
-        with result_card:
-            result_image = ui.image().classes("w-full rounded-lg")
+    # 結果顯示容器（初始隱藏）
+    result_container = ui.html(
+        """
+        <div class="result-container hidden" id="result-container">
+            <img class="result-image" id="result-image" src="" alt="結果">
+            <div style="display: flex; justify-content: center;">
+                <button class="retry-btn" onclick="location.reload()">🔄 重新拍攝</button>
+            </div>
+        </div>
+        """,
+        sanitize=False,
+    )
 
-        # 狀態顯示
-        status_label = ui.label("狀態：等待啟動攝像頭...").classes(
-            "mt-4 text-gray-600"
-        )
+    # 頂部狀態文字
+    with ui.element("div").classes("overlay-ui top-ui"):
+        status_label = ui.label("等待啟動攝像頭...").classes("status-text")
 
-        # Debug 資訊顯示
-        debug_label = ui.label("").classes(
-            "mt-2 text-sm text-blue-500 font-mono"
-        )
-
-        # 按鈕容器
-        button_container = ui.row().classes("mt-4 gap-4")
-
-        with button_container:
-            # 拍照按鈕（初始隱藏，攝像頭就緒後顯示）
-            capture_button = ui.button(
-                "📸 拍照",
-            ).classes("hidden").props("color=primary size=lg")
-
-            # 重新拍攝按鈕（初始隱藏）
-            retry_button = ui.button(
-                "🔄 重新拍攝",
-                on_click=lambda: ui.run_javascript("location.reload()"),
-            ).classes("hidden").props("color=secondary size=lg")
+    # 底部拍照按鈕
+    with ui.element("div").classes("overlay-ui bottom-ui"):
+        capture_button = ui.button("📷").classes("capture-btn hidden")
 
         # 處理攝像頭就緒事件
         def on_camera_ready(event_args) -> None:
             nonlocal is_camera_ready
             import json
 
-            # Debug: 打印完整的事件參數
             logger.debug(
                 f"收到 webcam_ready 事件, args={event_args}, type={type(event_args)}"
             )
@@ -126,11 +208,9 @@ def index_page():
             # 處理不同格式的事件參數
             resolution_dict = None
 
-            # 嘗試解析 JSON 字符串（emitEvent 傳遞的數據）
             if isinstance(event_args, str):
                 try:
                     resolution_dict = json.loads(event_args)
-                    logger.debug(f"JSON 解析成功: {resolution_dict}")
                 except json.JSONDecodeError as e:
                     logger.warning(f"JSON 解析失敗: {e}")
             elif isinstance(event_args, dict):
@@ -144,14 +224,11 @@ def index_page():
                         pass
                 elif isinstance(first_item, dict):
                     resolution_dict = first_item
-            elif event_args is not None:
-                logger.warning(f"未預期的事件參數格式: {type(event_args)}")
 
             # 檢查是否有錯誤
             if resolution_dict and "error" in resolution_dict:
                 error_msg = resolution_dict.get("error", "未知錯誤")
-                status_label.set_text(f"狀態：攝像頭錯誤 - {error_msg}")
-                debug_label.set_text(f"錯誤: {error_msg}")
+                status_label.set_text(f"攝像頭錯誤: {error_msg}")
                 logger.error(f"攝像頭初始化錯誤: {error_msg}")
                 return
 
@@ -159,15 +236,12 @@ def index_page():
                 is_camera_ready = True
                 width_int: int = resolution_dict.get("width", 0)
                 height_int: int = resolution_dict.get("height", 0)
-                resolution_str = f"{width_int}x{height_int}"
-                status_label.set_text("狀態：請將卡片對準鏡頭，對焦後按下拍照按鈕")
-                debug_label.set_text(f"攝像頭解析度: {resolution_str}")
-                logger.info(f"攝像頭就緒，解析度: {resolution_str}")
+                logger.info(f"攝像頭就緒，解析度: {width_int}x{height_int}")
 
-                # 顯示拍照按鈕
+                status_label.set_text("將卡片對準黃框，按下拍照")
                 capture_button.classes(remove="hidden")
             else:
-                status_label.set_text("狀態：無法存取攝像頭，請確認權限設定")
+                status_label.set_text("無法存取攝像頭，請確認權限")
                 logger.warning(
                     f"攝像頭初始化失敗，resolution_dict={resolution_dict}"
                 )
@@ -184,16 +258,14 @@ def index_page():
 
             is_processing = True
             capture_button.disable()
-            status_label.set_text("狀態：拍照並上傳中...")
+            status_label.set_text("拍照處理中...")
 
             try:
                 # 呼叫 JavaScript 拍照並透過 HTTP 上傳
                 result = await ui.run_javascript(
                     """
                     (async () => {
-                        console.log('[webcam] 開始拍照並上傳...');
                         const result = await WebcamCapture.captureAndUploadHTTP();
-                        console.log('[webcam] 上傳結果:', result);
                         return JSON.stringify(result);
                     })()
                     """,
@@ -211,35 +283,33 @@ def index_page():
 
                 if result_dict.get("success"):
                     img_url: str = result_dict.get("img_url", "")
-                    status_label.set_text("狀態：卡片擷取成功！")
-                    debug_label.set_text("")
+                    logger.info(f"卡片擷取成功: {img_url}")
 
-                    # 停止攝像頭
-                    ui.run_javascript("WebcamCapture.stop();")
+                    # 停止攝像頭並顯示結果
+                    ui.run_javascript(f"""
+                        WebcamCapture.stop();
+                        document.getElementById('video-container').classList.add('hidden');
+                        document.getElementById('result-container').classList.remove('hidden');
+                        document.getElementById('result-image').src = '{img_url}';
+                    """)
 
-                    # 隱藏 video，顯示結果
-                    video_card.classes(add="hidden")
-                    result_card.classes(remove="hidden")
-                    result_image.set_source(img_url)
-
-                    # 隱藏拍照按鈕，顯示重新拍攝按鈕
+                    # 隱藏拍照按鈕和狀態
                     capture_button.classes(add="hidden")
-                    retry_button.classes(remove="hidden")
+                    status_label.set_text("擷取成功！")
 
                 else:
                     # 失敗：顯示錯誤訊息
                     error_msg = result_dict.get("error", "未知錯誤")
-                    status_label.set_text(f"狀態：{error_msg}，請重試")
-                    debug_label.set_text("")
+                    status_label.set_text(f"{error_msg}，請重試")
                     capture_button.enable()
 
             except TimeoutError:
                 logger.error("拍照/上傳超時")
-                status_label.set_text("狀態：拍照超時，請重試")
+                status_label.set_text("拍照超時，請重試")
                 capture_button.enable()
             except Exception as e:
                 logger.error(f"拍照/上傳錯誤: {e}")
-                status_label.set_text(f"狀態：錯誤 - {e}")
+                status_label.set_text(f"錯誤: {e}")
                 capture_button.enable()
             finally:
                 is_processing = False
