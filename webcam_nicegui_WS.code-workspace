@@ -30,6 +30,8 @@
 
 		# 啟動 ngrok
 		 ."C:\Users\pappl\AppData\Local\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe"  http 25331
+		 >>
+		 ."C:\Users\pappl\tools\ngrok\ngrok.exe"  http 25331
 		ngrok http 25331
 
 		# ~選擇性啟動虛擬環境
