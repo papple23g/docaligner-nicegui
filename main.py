@@ -1,180 +1,18 @@
-import base64
-from datetime import datetime
+import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
-from capybara import imwarp_quadrangle
-from docaligner import DocAligner
 from fastapi import Request
 from loguru import logger
 from nicegui import app, ui
 
-# 設定圖片儲存路徑
-IMAGES_DIR = Path(__file__).parent / "images"
-IMAGES_DIR.mkdir(exist_ok=True)
-
-# 最多保留的圖片數量
-MAX_IMAGES_COUNT = 30
-
-# 輸出尺寸設定（寬度固定，高度按比例）- 提高到 1600 以輸出高解析度
-OUTPUT_WIDTH_INT = 1600
-
-# 初始化 DocAligner（冷啟動時載入模型，避免首次偵測延遲）
-logger.info("正在載入 DocAligner 模型...")
-DOC_ALIGNER = DocAligner()
-logger.info("DocAligner 模型載入完成！")
-
-
-def cleanup_old_images() -> None:
-    image_path_list = sorted(
-        IMAGES_DIR.glob("*.jpg"),
-        key=lambda p: p.stat().st_mtime,
-    )
-    while len(image_path_list) > MAX_IMAGES_COUNT:
-        oldest_path = image_path_list.pop(0)
-        oldest_path.unlink()
-        logger.info(f"已刪除舊圖片: {oldest_path.name}")
-
-
-def decode_base64_image(base64_data: str) -> np.ndarray | None:
-    try:
-        # 移除 base64 header (data:image/jpeg;base64,)
-        if "," in base64_data:
-            base64_data = base64_data.split(",")[1]
-
-        # 解碼 base64 為 bytes
-        image_bytes = base64.b64decode(base64_data)
-
-        # 轉換為 numpy array
-        nparr = np.frombuffer(image_bytes, np.uint8)
-
-        # 解碼為 BGR 圖片
-        bgr_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        return bgr_img
-    except Exception as e:
-        logger.error(f"解碼圖片失敗: {e}")
-        return None
-
-
-def encode_image_to_base64(
-    rgb_img: np.ndarray,
-    jpeg_quality_int: int = 95,
-) -> str:
-    # 轉換 RGB 到 BGR
-    bgr_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-
-    # 編碼為 JPEG（高品質）
-    success_bool, buffer = cv2.imencode(
-        ".jpg",
-        bgr_img,
-        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality_int],
-    )
-    if not success_bool:
-        raise ValueError("圖片編碼失敗")
-
-    # 轉換為 base64
-    base64_str = base64.b64encode(buffer).decode("utf-8")
-    return f"data:image/jpeg;base64,{base64_str}"
-
-
-def calculate_output_size(
-    img_height_int: int,
-    img_width_int: int,
-    target_width_int: int = OUTPUT_WIDTH_INT,
-) -> tuple[int, int]:
-    aspect_ratio_num = img_height_int / img_width_int
-    target_height_int = int(target_width_int * aspect_ratio_num)
-    return (target_width_int, target_height_int)
-
-
-def process_card_detection(
-    bgr_img: np.ndarray,
-) -> tuple[bool, np.ndarray | None, int]:
-    try:
-        # 偵測證件/卡片
-        poly_arr = DOC_ALIGNER(img=bgr_img, do_center_crop=True)
-        poly_len_int = len(poly_arr)
-
-        # Debug: 記錄偵測結果
-        if poly_len_int == 0:
-            logger.debug("未偵測到任何角點")
-        else:
-            logger.info(f"偵測到 {poly_len_int} 個角點: {poly_arr}")
-
-        if poly_len_int != 4:
-            return False, None, poly_len_int
-
-        logger.info("偵測到卡片！正在進行透視校正...")
-
-        # 轉換 BGR 到 RGB
-        rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-
-        # 計算輸出尺寸
-        img_height_int, img_width_int = rgb_img.shape[:2]
-        output_width_int, output_height_int = calculate_output_size(
-            img_height_int=img_height_int,
-            img_width_int=img_width_int,
-            target_width_int=OUTPUT_WIDTH_INT,
-        )
-
-        # 透視校正
-        flat_rgb_img = imwarp_quadrangle(
-            img=rgb_img,
-            polygon=poly_arr,
-            dst_size=(output_width_int, output_height_int),
-        )
-
-        return True, flat_rgb_img, poly_len_int
-
-    except Exception as e:
-        logger.error(f"卡片偵測/校正錯誤: {e}")
-        return False, None, 0
-
-
-def save_corrected_image(rgb_img: np.ndarray) -> Path | None:
-    import time
-
-    try:
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        filename = f"corrected_{timestamp_str}.jpg"
-        filepath = IMAGES_DIR / filename
-
-        # 轉換 RGB 到 BGR
-        bgr_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-
-        # 使用 imencode + 手動寫入（避免 cv2.imwrite 中文路徑問題）
-        success, buffer = cv2.imencode(
-            ".jpg",
-            bgr_img,
-            [cv2.IMWRITE_JPEG_QUALITY, 98],
-        )
-
-        if not success:
-            logger.error("cv2.imencode 返回失敗")
-            return None
-
-        # 手動寫入檔案（支援中文路徑）
-        with open(filepath, "wb") as f:
-            f.write(buffer.tobytes())
-
-        logger.info(f"已儲存校正後圖片: {filename}")
-
-        # Google Drive 同步延遲：等待檔案確實存在（最多等 2 秒）
-        for _ in range(20):
-            if filepath.exists():
-                logger.debug(f"檔案確認存在: {filepath}")
-                break
-            time.sleep(0.1)
-        else:
-            logger.warning(f"等待超時，檔案可能還在同步: {filepath}")
-
-        cleanup_old_images()
-        return filepath
-    except Exception as e:
-        logger.error(f"儲存圖片失敗: {e}")
-        return None
-
+sys.path.append(str(Path(__file__).parent.parent))  # noqa
+from libs.img_processer import (
+    get_flat_rgb_img,
+    save_corrected_image,
+    to_bgr_img,
+    to_img_b64_str,
+)
+from libs.utils import IMAGES_DIR
 
 # 設定靜態檔案路徑
 app.add_static_files("/static", str(Path(__file__).parent / "static"))
@@ -189,26 +27,19 @@ async def upload_photo_api(request: Request) -> dict:
     try:
         # 解析 JSON 請求
         data = await request.json()
-        base64_data = data.get("image")
-
-        if not base64_data:
-            logger.warning("收到空的圖片數據")
-            return {"success": False, "error": "沒有收到圖片數據"}
+        img_b64_str = data.get("image")
+        if not img_b64_str:
+            raise ValueError("沒有收到圖片數據")
 
         logger.info("收到 HTTP 上傳的圖片")
-
         # 解碼圖片
-        bgr_img = decode_base64_image(base64_data)
-        if bgr_img is None:
-            logger.error("圖片解碼失敗")
-            return {"success": False, "error": "圖片解碼失敗"}
-
+        bgr_img = to_bgr_img(img_b64_str)
         # 記錄圖片尺寸
         img_height_int, img_width_int = bgr_img.shape[:2]
         logger.info(f"收到高解析度圖片: {img_width_int}x{img_height_int}")
 
         # 偵測並校正卡片
-        success_bool, flat_rgb_img, poly_len_int = process_card_detection(
+        success_bool, flat_rgb_img, poly_len_int = get_flat_rgb_img(
             bgr_img=bgr_img,
         )
 
@@ -225,7 +56,8 @@ async def upload_photo_api(request: Request) -> dict:
             if saved_path and saved_path.exists():
                 image_url = f"/images/{saved_path.name}"
                 logger.info(
-                    f"圖片 URL: {image_url}, 檔案存在: {saved_path.exists()}")
+                    f"圖片 URL: {image_url}, 檔案存在: {saved_path.exists()}"
+                )
             else:
                 logger.error(f"儲存的圖片不存在: {saved_path}")
                 image_url = ""
@@ -325,7 +157,7 @@ def index_page():
 
             try:
                 # 解碼圖片
-                bgr_img = decode_base64_image(base64_data)
+                bgr_img = to_bgr_img(base64_data)
                 if bgr_img is None:
                     logger.error("圖片解碼失敗")
                     status_label.set_text("狀態：圖片解碼失敗，請重試")
@@ -339,7 +171,7 @@ def index_page():
                     f"原始圖片尺寸: {img_width_int}x{img_height_int}")
 
                 # 偵測並校正卡片
-                success_bool, flat_rgb_img, poly_len_int = process_card_detection(
+                success_bool, flat_rgb_img, poly_len_int = get_flat_rgb_img(
                     bgr_img=bgr_img,
                 )
 
@@ -353,7 +185,7 @@ def index_page():
                     out_height_int, out_width_int = flat_rgb_img.shape[:2]
 
                     # 編碼結果圖片為 base64（高品質）
-                    result_base64 = encode_image_to_base64(
+                    result_base64 = to_img_b64_str(
                         rgb_img=flat_rgb_img,
                         jpeg_quality_int=95,
                     )
