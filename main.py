@@ -2,90 +2,110 @@ import sys
 from pathlib import Path
 
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from loguru import logger
 from nicegui import app, ui
+from pydantic import BaseModel
 
 sys.path.append(str(Path(__file__).parent.parent))  # noqa
 from libs.img_processer import (
     get_flat_rgb_img,
     save_corrected_image,
     to_bgr_img,
-    to_img_b64_str,
 )
 from libs.utils import IMAGES_DIR
 
 # 設定靜態檔案路徑
 app.add_static_files("/static", str(Path(__file__).parent / "static"))
-# 設定圖片目錄為靜態檔案路徑（讓前端可以直接存取校正後的圖片）
 app.add_static_files("/images", str(IMAGES_DIR))
 logger.info(f"圖片目錄: {IMAGES_DIR}")
 
 
-# HTTP POST 端點：接收圖片並處理（避免 WebSocket 大小限制）
+class UploadPhotoPost(BaseModel):
+    image: str  # base64 encoded image
+
+
+class UploadPhotoOut(BaseModel):
+    success: bool
+    result_image_url: str | None = None
+    input_size: str | None = None
+    output_size: str | None = None
+    error: str | None = None
+    poly_count: int | None = None
+
+
+class CardDetectionError(Exception):
+    def __init__(
+        self,
+        message: str,
+        input_size: str,
+        poly_count: int,
+    ):
+        self.message = message
+        self.input_size = input_size
+        self.poly_count = poly_count
+        super().__init__(message)
+
+
+@app.exception_handler(CardDetectionError)
+async def card_detection_error_handler(
+    request: Request,
+    exc: CardDetectionError,
+) -> JSONResponse:
+    logger.warning(f"卡片偵測失敗: {exc.message}")
+    return JSONResponse(
+        status_code=200,  # 業務邏輯錯誤，非 HTTP 錯誤
+        content=UploadPhotoOut(
+            success=False,
+            error=exc.message,
+            input_size=exc.input_size,
+            poly_count=exc.poly_count,
+        ).model_dump(),
+    )
+
+
 @app.post("/api/upload_photo")
-async def upload_photo_api(request: Request) -> dict:
+async def upload_photo_api(post: UploadPhotoPost) -> UploadPhotoOut:
+    logger.info("收到 HTTP 上傳的圖片")
+    bgr_img = to_bgr_img(img_b64_str=post.image)
+    img_height_int, img_width_int = bgr_img.shape[:2]
+    input_size_str = f"{img_width_int}x{img_height_int}"
+    logger.info(f"收到高解析度圖片: {input_size_str}")
+
     try:
-        # 解析 JSON 請求
-        data = await request.json()
-        img_b64_str = data.get("image")
-        if not img_b64_str:
-            raise ValueError("沒有收到圖片數據")
-
-        logger.info("收到 HTTP 上傳的圖片")
-        # 解碼圖片
-        bgr_img = to_bgr_img(img_b64_str)
-        # 記錄圖片尺寸
-        img_height_int, img_width_int = bgr_img.shape[:2]
-        logger.info(f"收到高解析度圖片: {img_width_int}x{img_height_int}")
-
-        # 偵測並校正卡片
-        success_bool, flat_rgb_img, poly_len_int = get_flat_rgb_img(
-            bgr_img=bgr_img,
+        flat_rgb_img = get_flat_rgb_img(bgr_img=bgr_img)
+    except ValueError as e:
+        # 從錯誤訊息中提取角點數量
+        error_msg = str(e)
+        poly_count_int = 0
+        if "偵測到" in error_msg:
+            # 例如: "未偵測到卡片: 偵測到 3 個角點"
+            import re
+            match = re.search(r"偵測到 (\d+) 個角點", error_msg)
+            if match:
+                poly_count_int = int(match.group(1))
+        raise CardDetectionError(
+            message=error_msg,
+            input_size=input_size_str,
+            poly_count=poly_count_int,
         )
 
-        if success_bool and flat_rgb_img is not None:
-            logger.info("卡片擷取成功！")
+    logger.info("卡片擷取成功！")
+    saved_path = save_corrected_image(flat_rgb_img)
+    out_height_int, out_width_int = flat_rgb_img.shape[:2]
+    if saved_path and saved_path.exists():
+        image_url = f"/images/{saved_path.name}"
+        logger.info(f"圖片 URL: {image_url}, 檔案存在: {saved_path.exists()}")
+    else:
+        logger.error(f"儲存的圖片不存在: {saved_path}")
+        image_url = ""
 
-            # 儲存校正後的圖片
-            saved_path = save_corrected_image(flat_rgb_img)
-
-            # 取得輸出圖片尺寸
-            out_height_int, out_width_int = flat_rgb_img.shape[:2]
-
-            # 返回圖片 URL（避免 base64 太大超過 WebSocket 限制）
-            if saved_path and saved_path.exists():
-                image_url = f"/images/{saved_path.name}"
-                logger.info(
-                    f"圖片 URL: {image_url}, 檔案存在: {saved_path.exists()}"
-                )
-            else:
-                logger.error(f"儲存的圖片不存在: {saved_path}")
-                image_url = ""
-
-            return {
-                "success": True,
-                "result_image_url": image_url,
-                "input_size": f"{img_width_int}x{img_height_int}",
-                "output_size": f"{out_width_int}x{out_height_int}",
-            }
-        else:
-            # 偵測失敗
-            error_msg = (
-                "未偵測到卡片"
-                if poly_len_int == 0
-                else f"偵測到 {poly_len_int} 個角點，需要 4 個角點"
-            )
-            logger.warning(f"卡片偵測失敗: {error_msg}")
-            return {
-                "success": False,
-                "error": error_msg,
-                "input_size": f"{img_width_int}x{img_height_int}",
-                "poly_count": poly_len_int,
-            }
-
-    except Exception as e:
-        logger.error(f"HTTP 上傳處理錯誤: {e}")
-        return {"success": False, "error": str(e)}
+    return UploadPhotoOut(
+        success=True,
+        result_image_url=image_url,
+        input_size=input_size_str,
+        output_size=f"{out_width_int}x{out_height_int}",
+    )
 
 
 @ui.page("/")
@@ -139,100 +159,6 @@ def index_page():
                 on_click=lambda: ui.run_javascript("location.reload()"),
             ).classes("hidden").props("color=secondary size=lg")
 
-        # 處理拍照結果
-        def on_photo_received(base64_data: str) -> None:
-            nonlocal is_processing
-
-            if is_processing:
-                return
-
-            if not base64_data or not isinstance(base64_data, str):
-                logger.warning("收到無效的圖片數據")
-                status_label.set_text("狀態：拍照失敗，請重試")
-                capture_button.enable()
-                return
-
-            is_processing = True
-            status_label.set_text("狀態：處理中...")
-
-            try:
-                # 解碼圖片
-                bgr_img = to_bgr_img(base64_data)
-                if bgr_img is None:
-                    logger.error("圖片解碼失敗")
-                    status_label.set_text("狀態：圖片解碼失敗，請重試")
-                    capture_button.enable()
-                    return
-
-                # Debug: 記錄圖片尺寸
-                img_height_int, img_width_int = bgr_img.shape[:2]
-                logger.info(f"收到高解析度圖片: {img_width_int}x{img_height_int}")
-                debug_label.set_text(
-                    f"原始圖片尺寸: {img_width_int}x{img_height_int}")
-
-                # 偵測並校正卡片
-                success_bool, flat_rgb_img, poly_len_int = get_flat_rgb_img(
-                    bgr_img=bgr_img,
-                )
-
-                if success_bool and flat_rgb_img is not None:
-                    logger.info("卡片擷取成功！")
-
-                    # 儲存校正後的圖片
-                    save_corrected_image(flat_rgb_img)
-
-                    # 取得輸出圖片尺寸
-                    out_height_int, out_width_int = flat_rgb_img.shape[:2]
-
-                    # 編碼結果圖片為 base64（高品質）
-                    result_base64 = to_img_b64_str(
-                        rgb_img=flat_rgb_img,
-                        jpeg_quality_int=95,
-                    )
-
-                    # 更新前端 UI
-                    status_label.set_text("狀態：卡片擷取成功！")
-                    debug_label.set_text(
-                        f"原始: {img_width_int}x{img_height_int} → "
-                        f"輸出: {out_width_int}x{out_height_int}"
-                    )
-
-                    # 停止攝像頭
-                    ui.run_javascript("WebcamCapture.stop();")
-
-                    # 隱藏 video，顯示結果
-                    video_card.classes(add="hidden")
-                    result_card.classes(remove="hidden")
-                    result_image.set_source(result_base64)
-
-                    # 隱藏拍照按鈕，顯示重新拍攝按鈕
-                    capture_button.classes(add="hidden")
-                    retry_button.classes(remove="hidden")
-
-                else:
-                    # 偵測失敗
-                    if poly_len_int == 0:
-                        status_label.set_text("狀態：未偵測到卡片，請調整位置後重試")
-                    else:
-                        status_label.set_text(
-                            f"狀態：偵測到 {poly_len_int} 個角點，需要 4 個角點，請重試"
-                        )
-                    debug_label.set_text(
-                        f"尺寸: {img_width_int}x{img_height_int}, 角點數: {poly_len_int}"
-                    )
-                    capture_button.enable()
-
-            except Exception as e:
-                logger.error(f"處理錯誤: {e}")
-                status_label.set_text(f"狀態：處理錯誤: {e}")
-                capture_button.enable()
-
-            finally:
-                is_processing = False
-
-        # 使用全域事件監聽拍照結果
-        ui.on("webcam_photo", lambda e: on_photo_received(e.args))
-
         # 處理攝像頭就緒事件
         def on_camera_ready(event_args) -> None:
             nonlocal is_camera_ready
@@ -277,8 +203,8 @@ def index_page():
 
             if resolution_dict and resolution_dict.get("width", 0) > 0:
                 is_camera_ready = True
-                width_int = resolution_dict.get("width", 0)
-                height_int = resolution_dict.get("height", 0)
+                width_int: int = resolution_dict.get("width", 0)
+                height_int: int = resolution_dict.get("height", 0)
                 resolution_str = f"{width_int}x{height_int}"
                 status_label.set_text("狀態：請將卡片對準鏡頭，對焦後按下拍照按鈕")
                 debug_label.set_text(f"攝像頭解析度: {resolution_str}")
@@ -292,7 +218,7 @@ def index_page():
                     f"攝像頭初始化失敗，resolution_dict={resolution_dict}"
                 )
 
-        # 監聯攝像頭就緒事件
+        # 監聽攝像頭就緒事件
         ui.on("webcam_ready", lambda e: on_camera_ready(e.args))
 
         # 拍照按鈕點擊處理（使用 HTTP 上傳）
@@ -330,10 +256,9 @@ def index_page():
                 logger.debug(f"HTTP 上傳結果: {result_dict}")
 
                 if result_dict.get("success"):
-                    # 成功：顯示結果圖片（使用 URL 而不是 base64）
-                    result_url = result_dict.get("result_image_url", "")
-                    input_size = result_dict.get("input_size", "?")
-                    output_size = result_dict.get("output_size", "?")
+                    result_url: str = result_dict.get("result_image_url", "")
+                    input_size: str = result_dict.get("input_size", "?")
+                    output_size: str = result_dict.get("output_size", "?")
 
                     status_label.set_text("狀態：卡片擷取成功！")
                     debug_label.set_text(
